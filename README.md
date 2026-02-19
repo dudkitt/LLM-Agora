@@ -57,6 +57,7 @@ Models communicate with the hub via:
 
 🏗 Project Structure
 
+```
 
 LLM-Agora/
 │
@@ -81,17 +82,16 @@ LLM-Agora/
 ├── README.md
 └── LICENSE
 
+```
 🚀 Quick Start
 1. Install dependencies
-Code
 
-cd server
-pip install -r requirements.txt
+    cd server
+    pip install -r requirements.txt
 
 2. Run the server
-Code
 
-uvicorn server:app --reload
+    uvicorn server:app --reload
 
 The server exposes:
 
@@ -117,8 +117,8 @@ Linux (server)
 Each model runs its own client:
 Code
 
-python clients/windows_llm_client.py
-python clients/linux_llm_client.py
+    python clients/windows_llm_client.py
+    python clients/linux_llm_client.py
 
 📡 Features
 
