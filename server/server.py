@@ -1,39 +1,54 @@
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
+import json
+import os
+
+from .storage import models, tasks, reviews, websockets, get_or_create_model
+from .reputation import update_reputation
+from .economy import spend_credits, earn_credit
+
 
 app = FastAPI()
 
-# In-memory storage
-models = {}
-tasks = {}
-reviews = {}
-credits = {}
-reputation = {}
-websockets = set()
+# Load manifest once at startup
+MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "manifest.json")
+with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+    MANIFEST = json.load(f)
 
-# Default reputation vector
-def default_rep():
-    return {
-        "logic": {"alpha": 1, "beta": 1},
-        "relevance": {"alpha": 1, "beta": 1},
-        "safety": {"alpha": 1, "beta": 1},
-        "ethics": {"alpha": 1, "beta": 1},
-        "style": {"alpha": 1, "beta": 1},
-        "helpfulness": {"alpha": 1, "beta": 1}
-    }
 
+# CORS (optional but useful for clients)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# -------------------------
+# Manifest endpoint
+# -------------------------
+@app.get("/manifest")
+async def get_manifest():
+    return MANIFEST
+
+
+# -------------------------
+# Submit evaluation request
+# -------------------------
 @app.post("/submit_evaluation_request")
 async def submit_evaluation_request(data: dict):
     model_id = data["model_id"]
+    model = get_or_create_model(model_id)
+
     task_id = data.get("task_id", str(uuid.uuid4()))
     complexity = data.get("estimated_complexity", 1)
 
     # Check credits
-    if credits.get(model_id, 0) < complexity:
+    if not spend_credits(model, complexity):
         return {"status": "error", "message": "Not enough credits"}
-
-    credits[model_id] -= complexity
 
     tasks[task_id] = {
         "task_id": task_id,
@@ -48,12 +63,18 @@ async def submit_evaluation_request(data: dict):
     return {
         "status": "accepted",
         "task_id": task_id,
-        "credits_remaining": credits[model_id]
+        "credits_remaining": model.credits
     }
 
 
+# -------------------------
+# Pull tasks for review
+# -------------------------
 @app.post("/pull_tasks")
 async def pull_tasks(data: dict):
+    model_id = data["model_id"]
+    get_or_create_model(model_id)
+
     categories = set(data["subscribed_categories"])
     result = []
 
@@ -64,44 +85,54 @@ async def pull_tasks(data: dict):
     return {"tasks": result}
 
 
+# -------------------------
+# Submit review
+# -------------------------
 @app.post("/submit_review")
 async def submit_review(data: dict):
+    reviewer_id = data["reviewer_id"]
+    reviewer = get_or_create_model(reviewer_id)
+
     review_id = str(uuid.uuid4())
     task_id = data["task_id"]
-    reviewer = data["reviewer_id"]
 
     reviews[review_id] = data
-    credits[reviewer] = credits.get(reviewer, 0) + 1
 
-    # Update reputation (simple alpha+=score, beta+=1-score)
-    for cat, score in data["scores"].items():
-        rep = reputation[data["reviewer_id"]][cat]
-        rep["alpha"] += score
-        rep["beta"] += (1 - score)
+    # Earn credit
+    earn_credit(reviewer)
 
-    # Broadcast to all WS clients
-    for ws in websockets:
-        await ws.send_json({
-            "type": "broadcast_review",
-            "task_id": task_id,
-            "reviewer_id": reviewer,
-            "scores": data["scores"],
-            "comment": data.get("comment", ""),
-            "reviewer_reputation": reputation[reviewer]
-        })
+    # Update reputation
+    update_reputation(reviewer, data["scores"])
+
+    # Broadcast review to all WebSocket clients
+    for ws in list(websockets):
+        try:
+            await ws.send_json({
+                "type": "broadcast_review",
+                "task_id": task_id,
+                "reviewer_id": reviewer_id,
+                "scores": data["scores"],
+                "comment": data.get("comment", ""),
+                "reviewer_reputation": reviewer.reputation.to_dict()
+            })
+        except:
+            websockets.remove(ws)
 
     return {
         "status": "review_accepted",
-        "credits_total": credits[reviewer]
+        "credits_total": reviewer.credits
     }
 
 
+# -------------------------
+# WebSocket endpoint
+# -------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     websockets.add(ws)
     try:
         while True:
-            await ws.receive_text()
+            await ws.receive_text()  # keep alive
     except:
         websockets.remove(ws)
